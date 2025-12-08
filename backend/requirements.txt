@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+gunicorn
+sqlalchemy
+pandas
+pdfplumber
+scikit-learn
+python-multipart
+pydantic-settings
