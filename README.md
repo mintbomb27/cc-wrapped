@@ -1,4 +1,5 @@
 # Credit Card Wrapped 💳
+#### Generated using: Antigravity + Claude Sonnet 4.5
 
 A comprehensive credit card statement analyzer that helps you understand your spending patterns, categorize transactions, and generate insightful reports.
 
