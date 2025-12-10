@@ -72,7 +72,7 @@ def upload_statement(
             for t_data in transactions_data:
                 # Detect bill payments, cashback, and hidden charges
                 description_upper = t_data["description"].upper()
-                is_bill_payment = any(h in description_upper for h in ["BBPS", "MB/IB PAYMENT"]) and t_data.get("is_credit", False)
+                is_bill_payment = any(h in description_upper for h in ["BBPS", "MB/IB PAYMENT", "NETBANKING TRANSFER", "DUAL PYT"])
                 is_cashback = "CASHBACK" in description_upper and t_data.get("is_credit", False)
                 is_hidden_charge = any(h in description_upper for h in ["JOINING FEE", "GST", "FUEL SURCHARGE"])
                 
@@ -125,7 +125,7 @@ def upload_statement(
 def read_transactions(card_id: int, db: Session = Depends(get_db)):
     transactions = db.query(models.Transaction).filter(
         models.Transaction.card_id == card_id
-    ).order_by(models.Transaction.date.desc()).all()
+    ).order_by(models.Transaction.date).all()
     return transactions
 
 @router.get("/cards/{card_id}/report/")
@@ -135,28 +135,71 @@ def get_report(card_id: int, db: Session = Depends(get_db)):
         models.Transaction.card_id == card_id
     ).all()
     
-    # Filter for spending calculation: exclude credits and hidden charges
-    # Spending = debits only, excluding hidden charges
-    spending_transactions = [t for t in all_transactions if not t.is_credit and not t.is_hidden_charge]
+    # Spending calculation logic:
+    # 1. Include all debits (is_credit=False) that are NOT bill payments or cashback
+    # 2. Include credits (is_credit=True) that are NOT bill payments or cashback as negative (refunds/reversals)
+    # 3. Exclude hidden charges from spending
     
-    # Calculate total spend (debits only, excluding hidden charges)
-    total_spend = sum(t.amount for t in spending_transactions)
+    total_spend = 0.0
+    spending_transactions = []
     
-    # Calculate total cashback (credits that are cashback)
-    cashback_transactions = [t for t in all_transactions if t.is_cashback]
-    total_cashback = sum(t.amount for t in cashback_transactions)
+    for t in all_transactions:
+        # Skip hidden charges
+        if t.is_hidden_charge:
+            continue
+        
+        # Skip bill payments (these are not spending)
+        if t.is_bill_payment:
+            continue
+        
+        # Handle cashback transactions separately
+        if t.is_cashback:
+            continue
+        
+        # Debit transactions (normal spending)
+        if not t.is_credit:
+            total_spend += t.amount
+            spending_transactions.append(t)
+        else:
+            # Credit transactions (refunds/reversals) - reduce spending
+            total_spend -= t.amount
+            spending_transactions.append(t)
+    
+    # Calculate total cashback
+    # Credits with is_cashback=True add to cashback
+    # Debits with is_cashback=True (cashback reversals) subtract from cashback
+    total_cashback = 0.0
+    cashback_transactions = []
+    
+    for t in all_transactions:
+        if t.is_cashback:
+            if t.is_credit:
+                # Cashback credit - add to total
+                total_cashback += t.amount
+                cashback_transactions.append(t)
+            else:
+                # Cashback reversal (debit) - subtract from total
+                total_cashback -= t.amount
+                cashback_transactions.append(t)
     
     # Calculate total hidden charges
     hidden_charge_transactions = [t for t in all_transactions if t.is_hidden_charge]
     total_hidden_charges = sum(t.amount for t in hidden_charge_transactions)
     
-    # Category breakdown (spending only, excluding hidden charges)
+    # Category breakdown (spending only, excluding hidden charges, bill payments, and cashback)
+    # Include both debits and refunds in category breakdown
     category_spend = {}
     for t in spending_transactions:
-        category_spend[t.category] = category_spend.get(t.category, 0) + t.amount
+        if not t.is_credit:
+            # Debit - add to category
+            category_spend[t.category] = category_spend.get(t.category, 0) + t.amount
+        else:
+            # Credit (refund) - subtract from category
+            category_spend[t.category] = category_spend.get(t.category, 0) - t.amount
     
-    # Largest transaction (spending only)
-    largest = max(spending_transactions, key=lambda t: t.amount) if spending_transactions else None
+    # Largest transaction (spending only, debits only for this metric)
+    debit_spending = [t for t in spending_transactions if not t.is_credit]
+    largest = max(debit_spending, key=lambda t: t.amount) if debit_spending else None
     
     report = {
         "total_spend": total_spend,
@@ -169,9 +212,11 @@ def get_report(card_id: int, db: Session = Depends(get_db)):
             "amount": largest.amount,
             "date": largest.date
         } if largest else None,
-        "transaction_count": len(spending_transactions),
-        "cashback_count": len(cashback_transactions),
-        "hidden_charge_count": len(hidden_charge_transactions)
+        "transaction_count": len(debit_spending),
+        "cashback_count": len([t for t in cashback_transactions if t.is_credit]),
+        "cashback_reversal_count": len([t for t in cashback_transactions if not t.is_credit]),
+        "hidden_charge_count": len(hidden_charge_transactions),
+        "refund_count": len([t for t in spending_transactions if t.is_credit])
     }
     return report
 
